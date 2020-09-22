@@ -1,0 +1,169 @@
+provider "aws" {
+  region  = "us-east-1"
+  access_key = "**************"
+  secret_key = "**************"
+}
+
+variable "subnet_prefix" {
+  description = "cidr block for the subnet"
+  #default = ["10.0.0.0/24"]
+  type = list
+}
+
+resource "aws_vpc" "main-vpc" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    Name = "TF_VPC"
+  }
+}
+
+resource "aws_internet_gateway" "main-igw" {
+  vpc_id = aws_vpc.main-vpc.id
+
+  tags = {
+    Name = "TF_IGW"
+  }
+}
+
+resource "aws_route_table" "main-route-table" {
+  vpc_id = aws_vpc.main-vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main-igw.id
+  }
+
+  route {
+    ipv6_cidr_block        = "::/0"
+    gateway_id = aws_internet_gateway.main-igw.id
+  }
+
+  tags = {
+    Name = "TF_RT"
+  }
+}
+
+resource "aws_subnet" "main-subnet" {
+  vpc_id     = aws_vpc.main-vpc.id
+  cidr_block = var.subnet_prefix[0].cidr_block
+  availability_zone = "us-east-1a"
+  #aws_route_table = aws_route_table.main-route-table.id
+
+  tags = {
+    Name = var.subnet_prefix[0].name
+  }
+}
+
+resource "aws_subnet" "dev-subnet" {
+  vpc_id     = aws_vpc.main-vpc.id
+  cidr_block = var.subnet_prefix[1].cidr_block
+  availability_zone = "us-east-1a"
+  #aws_route_table = aws_route_table.main-route-table.id
+
+  tags = {
+    Name = var.subnet_prefix[1].name
+  }
+}
+
+resource "aws_route_table_association" "subnet-rt-association" {
+  subnet_id      = aws_subnet.main-subnet.id
+  route_table_id = aws_route_table.main-route-table.id
+}
+
+resource "aws_security_group" "main-security-group" {
+  name        = "main-security-group"
+  description = "Security group for Terraform testing."
+  vpc_id      = aws_vpc.main-vpc.id
+
+  ingress {
+    description = "SSH from internet"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTP Traffic from internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS Traffic from internet"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "TF_SG"
+  }
+}
+
+resource "aws_network_interface" "main-network-interface" {
+  subnet_id       = aws_subnet.main-subnet.id
+  private_ips     = ["10.0.1.50"]
+  security_groups = [aws_security_group.main-security-group.id]
+
+  # attachment {
+  #   instance     = aws_instance.test.id
+  #   device_index = 1
+  # }
+}
+
+resource "aws_eip" "main-eip" {
+  vpc                       = true
+  network_interface         = aws_network_interface.main-network-interface.id
+  associate_with_private_ip = "10.0.1.50"
+  depends_on = [aws_internet_gateway.main-igw, aws_instance.main-web-server]
+  
+  # We use the 'depends on' flag here to specify that the EIP creation is dependent ...
+  # ... on IGW being created first and also the EC2 instance being first and put in a ...
+  # ... running state so that the network interface with the EIP gets attached. We don't ...
+  # ... need to specify the id of the IGW or the EC2 here, ...
+  # ... rather the whole object needs to be referenced.
+}
+
+output "server_public_ip" {
+  value = aws_eip.main-eip.public_ip
+}
+
+resource "aws_instance" "main-web-server" {
+    ami = "ami-0817d428a6fb68645"
+    instance_type = "t2.micro"
+    availability_zone = "us-east-1a"
+    key_name = "terraform-key-pair"
+    
+    network_interface {
+        device_index = 0
+        network_interface_id = aws_network_interface.main-network-interface.id
+        delete_on_termination = false
+        # 'true' is not supported here.
+    }
+
+    user_data = <<-EOF
+                #!/bin/bash
+                sudo apt update -y
+                sudo apt install apache2 -y
+                sudo systemctl start apache2
+                sudo bash -c 'echo your very first web server > /var/www/html/index.html'
+                EOF
+    tags = {
+        Name = "TF_Web-Server"
+    }
+}
+
+output "aws_instance_id" {
+  value = aws_instance.main-web-server.id
+}
